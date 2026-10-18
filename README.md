@@ -54,5 +54,5 @@ docker exec rabbitmq-1 rabbitmqctl cluster_status
 ## Avance
 | Paso | Descripción | Estado |
 |---|---|---|
-| F4-a | Clúster RabbitMQ 2 nodos + usuarios por definitions | 🔄 |
+| F4-a | Clúster RabbitMQ 2 nodos + usuarios por definitions | ✅ |
 | F4-b | `apps/compose.aws.yml` (microservicios + Oracle) | ⏳ |

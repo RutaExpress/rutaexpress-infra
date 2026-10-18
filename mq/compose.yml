@@ -1,0 +1,76 @@
+# Clúster RabbitMQ de 2 nodos (Guía 2.3.1). Los secretos se leen del archivo .env (no se sube a GitHub)
+services:
+
+  # Paso previo: genera definitions.json con las contraseñas en hash y termina (Exited 0)
+  definitions:
+    image: rabbitmq:4.2-management
+    container_name: rabbitmq-definitions
+    entrypoint: ["sh", "/scripts/generar-definitions.sh"]
+    environment:
+      RX_ADMIN_PASSWORD: ${RX_ADMIN_PASSWORD:?Falta RX_ADMIN_PASSWORD en .env}
+      RX_OPS_PASSWORD: ${RX_OPS_PASSWORD:?Falta RX_OPS_PASSWORD en .env}
+      RX_SHIPMENTS_PASSWORD: ${RX_SHIPMENTS_PASSWORD:?Falta RX_SHIPMENTS_PASSWORD en .env}
+      RX_NOTIFY_PASSWORD: ${RX_NOTIFY_PASSWORD:?Falta RX_NOTIFY_PASSWORD en .env}
+    volumes:
+      - ./generar-definitions.sh:/scripts/generar-definitions.sh:ro
+      - ./definitions.template.json:/scripts/definitions.template.json:ro
+      - rabbitmq_definitions:/definitions
+
+  rabbitmq-1:
+    image: rabbitmq:4.2-management
+    container_name: rabbitmq-1
+    hostname: rabbitmq-1                      # nombre del nodo: rabbit@rabbitmq-1
+    restart: unless-stopped
+    ports:
+      - "5672:5672"                           # AMQP
+      - "15672:15672"                         # consola web
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_ERLANG_COOKIE:?Falta RABBITMQ_ERLANG_COOKIE en .env}
+    volumes:
+      - rabbitmq_data_1:/var/lib/rabbitmq
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - rabbitmq_definitions:/etc/rabbitmq/definitions:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - rabbitmq_cluster
+    depends_on:
+      definitions:
+        condition: service_completed_successfully
+
+  rabbitmq-2:
+    image: rabbitmq:4.2-management
+    container_name: rabbitmq-2
+    hostname: rabbitmq-2                      # nombre del nodo: rabbit@rabbitmq-2
+    restart: unless-stopped
+    ports:
+      - "5673:5672"                           # AMQP (5673 en el host)
+      - "15673:15672"                         # consola web
+    environment:
+      RABBITMQ_ERLANG_COOKIE: ${RABBITMQ_ERLANG_COOKIE:?Falta RABBITMQ_ERLANG_COOKIE en .env}   # MISMA cookie
+    volumes:
+      - rabbitmq_data_2:/var/lib/rabbitmq
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - rabbitmq_definitions:/etc/rabbitmq/definitions:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - rabbitmq_cluster
+    depends_on:
+      rabbitmq-1:
+        condition: service_healthy            # arranca cuando el nodo 1 ya responde, para unirse a él
+
+volumes:
+  rabbitmq_definitions:
+  rabbitmq_data_1:
+  rabbitmq_data_2:
+
+networks:
+  rabbitmq_cluster:
+    driver: bridge
