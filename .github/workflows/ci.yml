@@ -20,4 +20,11 @@ jobs:
           cp .env.example .env
           docker compose config --quiet
           python3 -m json.tool definitions.template.json > /dev/null
-          echo "compose y definitions válidos"
+          echo "mq: compose y definitions válidos"
+
+      - name: Validar apps/compose.aws.yml
+        working-directory: apps
+        run: |
+          cp .env.example .env
+          docker compose -f compose.aws.yml config --quiet --no-path-resolution
+          echo "apps: compose válido"
