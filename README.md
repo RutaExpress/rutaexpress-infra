@@ -1,6 +1,6 @@
 # rutaexpress-infra
 
-Infraestructura del caso RutaExpress (DSY1107 Cloud Native I): **clúster RabbitMQ de 2 nodos** (`mq/`) y **compose de los microservicios** (`apps/`) para AWS.
+Infraestructura del caso RutaExpress (DSY1107 Cloud Native I): **clúster RabbitMQ de 2 nodos** (`mq/`), **compose de los microservicios** (`apps/`) y la **plantilla CloudFormation** (`cloudformation/`) que crea todo en AWS.
 Los Dockerfiles viven en cada microservicio; este repo solo tiene los compose y la configuración.
 
 ## Estructura
@@ -15,7 +15,9 @@ rutaexpress-infra/
 ├── apps/                        Microservicios + Oracle → ec2-apps
 │   ├── compose.aws.yml          oracle, shipments, bff, notify, rabbit-admin (build desde cada repo)
 │   └── .env.example             MQ_HOST, contraseñas y carpetas de los repos
-└── .github/workflows/ci.yml     valida los compose en cada PR
+├── cloudformation/
+│   └── rutaexpress-stack.yaml   VPC, Security Groups, ec2-mq, ec2-apps (EIP), API Gateway + JWT + CORS
+└── .github/workflows/ci.yml     valida los compose y la plantilla (cfn-lint) en cada PR
 ```
 
 ## Clúster RabbitMQ (`mq/`)
@@ -58,6 +60,33 @@ docker compose -f compose.aws.yml ps
 - `MQ_HOST`: `host.docker.internal` en local; **IP privada de ec2-mq** en AWS.
 - Simulador de fallas: `NOTIFY_SMTP_FAIL_FIRST=2` (reintentos que se recuperan) o `=3` (termina en DLQ); se aplica recreando solo notify.
 
+## Despliegue en AWS (`cloudformation/rutaexpress-stack.yaml`)
+```
+Internet ──► API Gateway (CORS + JWT Entra ID v2, 6 rutas) ──► ec2-apps :8082 BFF ──► shipments ──► Oracle
+                                                                  │ AMQP por IP privada (SG: solo desde ec2-apps)
+                                                                  ▼
+                                                     ec2-mq: rabbitmq-1 + rabbitmq-2
+```
+| Qué crea | Detalle |
+|---|---|
+| Red | VPC 10.0.0.0/16, subred pública, Internet Gateway, rutas |
+| Security Groups | apps: 443 y 8082 abiertos; 22 y 8085 solo `AdminCidr`. mq: 5672-5673 solo desde el SG de apps; 22 y 15672-15673 solo `AdminCidr` |
+| ec2-mq | UserData: Docker → clona este repo → genera `mq/.env` desde parámetros NoEcho → `docker compose up -d` |
+| ec2-apps + Elastic IP | UserData: Docker + swap 4 GB → clona los 5 repos con el token (y lo borra del remoto) → genera `apps/.env` con la IP privada de ec2-mq → build de a una → `up -d` |
+| API Gateway HTTP | CORS (`https://<EIP>`, `http://localhost:4200`), authorizer JWT v2, stage `rutaexpress`, 6 rutas con su verbo |
+
+| Verbo | Ruta | JWT |
+|---|---|---|
+| GET | /api/v1/public/status | no |
+| GET | /api/v1/me | sí |
+| GET | /api/v1/shipments | sí |
+| POST | /api/v1/shipments | sí |
+| GET | /api/v1/shipments/{id} | sí |
+| PUT | /api/v1/shipments/{id}/status | sí |
+
+Parámetros secretos (`NoEcho`): token de GitHub, cookie de Erlang, contraseñas `rx-*` y de Oracle. Nunca se escriben en el repo.
+Progreso del arranque en cada EC2: `sudo tail -f /var/log/cloud-init-output.log` (termina con `RUTAEXPRESS ... LISTO`).
+
 ## Bajar
 - `docker compose down` → detiene (los datos se conservan en los volúmenes)
 - `docker compose down -v` → borra también los datos
@@ -66,4 +95,5 @@ docker compose -f compose.aws.yml ps
 | Paso | Descripción | Estado |
 |---|---|---|
 | F4-a | Clúster RabbitMQ 2 nodos + usuarios por definitions | ✅ |
-| F4-b | `apps/compose.aws.yml` (microservicios + Oracle) | 🔄 |
+| F4-b | `apps/compose.aws.yml` (microservicios + Oracle) | ✅ |
+| F5 | Plantilla CloudFormation `rutaexpress-stack.yaml` | ✅ |

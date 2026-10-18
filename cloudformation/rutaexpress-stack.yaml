@@ -1,0 +1,491 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  RutaExpress en AWS Academy: VPC, ec2-mq (cluster RabbitMQ de 2 nodos con usuarios rx-*),
+  ec2-apps con Elastic IP (Oracle, shipments, bff, notify, rabbit-admin) y API Gateway HTTP
+  con CORS y authorizer JWT v2 de Microsoft Entra ID. Basado en la plantilla de referencia del curso.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Acceso (tu IP y SSH)" }
+        Parameters: [AdminCidr, InstanceConnectCidr, KeyName]
+      - Label: { default: "Repositorios privados de GitHub" }
+        Parameters: [GitHubOrg, GitHubToken]
+      - Label: { default: "Secretos RabbitMQ (solo letras y numeros)" }
+        Parameters: [RabbitErlangCookie, RxAdminPassword, RxOpsPassword, RxShipmentsPassword, RxNotifyPassword]
+      - Label: { default: "Secretos Oracle (solo letras y numeros)" }
+        Parameters: [OraclePassword, OracleAppUserPassword]
+      - Label: { default: "Microsoft Entra ID (authorizer JWT del API Gateway)" }
+        Parameters: [AzureTenantId, AzureClientId]
+      - Label: { default: "Instancias" }
+        Parameters: [AmiId, AppsInstanceType, MqInstanceType, InstanceProfile]
+
+Parameters:
+  # ---------------------------------------------------------------- Acceso
+  AdminCidr:
+    Type: String
+    Description: Tu IP publica con /32 (ver https://checkip.amazonaws.com). Unica que entra a SSH, consola RabbitMQ y rabbit-admin
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+  InstanceConnectCidr:
+    Type: String
+    Default: 18.206.107.24/29
+    Description: Rango de EC2 Instance Connect en us-east-1 (SSH desde el navegador)
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: vockey
+    Description: Par de claves para SSH (en AWS Academy existe "vockey")
+
+  # ---------------------------------------------------------------- GitHub
+  GitHubOrg:
+    Type: String
+    Default: RutaExpress
+    Description: Organizacion de GitHub donde estan los repos
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    MinLength: 20
+    Description: Token fine-grained de SOLO LECTURA (Contents read) para los repos privados. Se borra de los repos despues de clonar
+
+  # ---------------------------------------------------------------- RabbitMQ
+  RabbitErlangCookie:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{20,}$'
+    Description: Cookie de Erlang compartida por los 2 nodos (20+ letras/numeros)
+  RxAdminPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave de rx-admin (consola web)
+  RxOpsPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave de rx-ops (ms-rutaexpress-rabbit-admin)
+  RxShipmentsPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave de rx-shipments (productor)
+  RxNotifyPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave de rx-notify (consumidor)
+
+  # ---------------------------------------------------------------- Oracle
+  OraclePassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave del administrador de Oracle
+  OracleAppUserPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave de SHIPMENTS_USER (la usa shipments)
+
+  # ---------------------------------------------------------------- Entra ID (no son secretos)
+  AzureTenantId:
+    Type: String
+    Default: 70d90397-3549-4694-8a16-70f45020c6fa
+  AzureClientId:
+    Type: String
+    Default: 5421b650-58dc-4ae6-863e-a34f55e0177a
+
+  # ---------------------------------------------------------------- Instancias
+  AmiId:
+    Type: AWS::EC2::Image::Id
+    Default: ami-0b6d9d3d33ba97d99
+    Description: Ubuntu de us-east-1 (la misma de la plantilla de referencia)
+  AppsInstanceType:
+    Type: String
+    Default: t3.large
+    AllowedValues: [t3.medium, t3.large]
+    Description: ec2-apps corre Oracle + 4 microservicios Java (t3.large = 8 GB recomendado)
+  MqInstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.small, t3.medium]
+  InstanceProfile:
+    Type: String
+    Default: LabInstanceProfile
+    Description: Perfil de instancia que trae AWS Academy
+
+Resources:
+  # ================================================================ Red
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: rutaexpress-vpc }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: rutaexpress-igw }]
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: 10.0.0.0/20
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: rutaexpress-subnet-public1 }]
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: rutaexpress-rtb-public }]
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  # ================================================================ Security Groups (minimo privilegio)
+  AppsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: rutaexpress-apps-sg
+      GroupDescription: ec2-apps - frontend, BFF, rabbit-admin (solo admin) y SSH
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AdminCidr, Description: SSH administrador }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref InstanceConnectCidr, Description: EC2 Instance Connect }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: Frontend HTTPS (cuando se agregue) }
+        - { IpProtocol: tcp, FromPort: 8082, ToPort: 8082, CidrIp: 0.0.0.0/0, Description: BFF (lo llama el API Gateway; valida JWT y roles) }
+        - { IpProtocol: tcp, FromPort: 8085, ToPort: 8085, CidrIp: !Ref AdminCidr, Description: rabbit-admin solo administrador }
+      Tags: [{ Key: Name, Value: rutaexpress-apps-sg }]
+
+  MqSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: rutaexpress-mq-sg
+      GroupDescription: ec2-mq - AMQP solo desde ec2-apps, consola RabbitMQ solo admin y SSH
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AdminCidr, Description: SSH administrador }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref InstanceConnectCidr, Description: EC2 Instance Connect }
+        - { IpProtocol: tcp, FromPort: 5672, ToPort: 5673, SourceSecurityGroupId: !Ref AppsSecurityGroup, Description: AMQP solo desde ec2-apps }
+        - { IpProtocol: tcp, FromPort: 15672, ToPort: 15673, CidrIp: !Ref AdminCidr, Description: Consola RabbitMQ solo administrador }
+      Tags: [{ Key: Name, Value: rutaexpress-mq-sg }]
+
+  # ================================================================ ec2-mq (cluster RabbitMQ)
+  MqInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: PublicRoute
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref MqInstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref MqSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: { VolumeSize: 16, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: ec2-mq }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # ec2-mq: Docker + cluster RabbitMQ de 2 nodos (rutaexpress-infra/mq). Log: /var/log/cloud-init-output.log
+          set -eu
+          echo "[1/4] Instalando Docker"
+          apt-get update -y
+          apt-get install -y docker.io git
+          apt-get install -y docker-compose-v2 || apt-get install -y docker-compose-plugin
+          systemctl enable --now docker
+          usermod -aG docker ubuntu
+
+          echo "[2/4] Clonando rutaexpress-infra (repo privado)"
+          cd /home/ubuntu
+          git clone "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/rutaexpress-infra.git"
+          git -C rutaexpress-infra remote set-url origin "https://github.com/${GitHubOrg}/rutaexpress-infra.git"
+
+          echo "[3/4] Generando mq/.env (secretos desde parametros NoEcho)"
+          cat > rutaexpress-infra/mq/.env <<EOF
+          RABBITMQ_ERLANG_COOKIE=${RabbitErlangCookie}
+          RX_ADMIN_PASSWORD=${RxAdminPassword}
+          RX_OPS_PASSWORD=${RxOpsPassword}
+          RX_SHIPMENTS_PASSWORD=${RxShipmentsPassword}
+          RX_NOTIFY_PASSWORD=${RxNotifyPassword}
+          EOF
+          chmod 600 rutaexpress-infra/mq/.env
+          chown -R ubuntu:ubuntu rutaexpress-infra
+
+          echo "[4/4] Levantando el cluster"
+          cd rutaexpress-infra/mq
+          docker compose up -d
+          echo "RUTAEXPRESS MQ LISTO"
+
+  # ================================================================ ec2-apps (microservicios)
+  AppsEip:
+    Type: AWS::EC2::EIP
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: rutaexpress-apps-eip }]
+
+  AppsInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: PublicRoute
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref AppsInstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref AppsSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: { VolumeSize: 30, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: ec2-apps }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # ec2-apps: Docker, swap, repos y microservicios (rutaexpress-infra/apps). Log: /var/log/cloud-init-output.log
+          set -eu
+          echo "[1/6] Instalando Docker"
+          apt-get update -y
+          apt-get install -y docker.io git
+          apt-get install -y docker-compose-v2 || apt-get install -y docker-compose-plugin
+          systemctl enable --now docker
+          usermod -aG docker ubuntu
+
+          echo "[2/6] Swap de 4 GB (Oracle + 4 JVM + compilacion Maven)"
+          fallocate -l 4G /swapfile
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
+          echo "[3/6] Clonando repos privados uno al lado del otro (el compose usa ../../)"
+          cd /home/ubuntu
+          for repo in rutaexpress-infra ms-rutaexpress-shipments ms-rutaexpress-bff ms-rutaexpress-notify ms-rutaexpress-rabbit-admin; do
+            git clone "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/$repo.git"
+            git -C "$repo" remote set-url origin "https://github.com/${GitHubOrg}/$repo.git"
+          done
+
+          echo "[4/6] Generando apps/.env (IP privada de ec2-mq + secretos)"
+          cat > rutaexpress-infra/apps/.env <<EOF
+          MQ_HOST=${MqInstance.PrivateIp}
+          RX_SHIPMENTS_PASSWORD=${RxShipmentsPassword}
+          RX_NOTIFY_PASSWORD=${RxNotifyPassword}
+          RX_OPS_PASSWORD=${RxOpsPassword}
+          ORACLE_PASSWORD=${OraclePassword}
+          APP_USER_PASSWORD=${OracleAppUserPassword}
+          CORS_ALLOWED_ORIGINS=https://${AppsEip},http://localhost:4200
+          API_URL=https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/rutaexpress
+          EOF
+          chmod 600 rutaexpress-infra/apps/.env
+          chown -R ubuntu:ubuntu /home/ubuntu
+
+          echo "[5/6] Construyendo imagenes de a una (evita quedarse sin memoria)"
+          cd rutaexpress-infra/apps
+          for svc in shipments bff notify rabbit-admin; do
+            docker compose -f compose.aws.yml build "$svc"
+          done
+
+          echo "[6/6] Levantando Oracle y microservicios"
+          docker compose -f compose.aws.yml up -d
+          echo "RUTAEXPRESS APPS LISTO"
+
+  AppsEipAssociation:
+    Type: AWS::EC2::EIPAssociation
+    Properties:
+      AllocationId: !GetAtt AppsEip.AllocationId
+      InstanceId: !Ref AppsInstance
+
+  # ================================================================ API Gateway (HTTP API)
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: RutaExpress-Gateway
+      ProtocolType: HTTP
+      # El Gateway responde solo el preflight OPTIONS (no hay rutas ANY/OPTIONS que choquen)
+      CorsConfiguration:
+        AllowOrigins: [!Sub "https://${AppsEip}", "http://localhost:4200"]
+        AllowHeaders: [authorization, content-type]
+        AllowMethods: [GET, POST, PUT, OPTIONS]
+        AllowCredentials: false
+        MaxAge: 300
+
+  # Token v2 de Entra ID: issuer login.microsoftonline.com/<tenant>/v2.0 y audiencia = clientId (sin api://)
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: RutaExpress-JWT-EntraID
+      AuthorizerType: JWT
+      IdentitySource: ["$request.header.Authorization"]
+      JwtConfiguration:
+        Issuer: !Sub "https://login.microsoftonline.com/${AzureTenantId}/v2.0"
+        Audience: [!Ref AzureClientId]
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: rutaexpress
+      AutoDeploy: true
+
+  # ---------------------------------------------------------------- Rutas (una por endpoint, cada una con su verbo)
+  # GET /api/v1/public/status  (publica, sin JWT)
+  IntPublicStatus:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/public/status"
+      PayloadFormatVersion: "1.0"
+  RoutePublicStatus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/public/status"
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${IntPublicStatus}"
+
+  # GET /api/v1/me
+  IntMe:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/me"
+      PayloadFormatVersion: "1.0"
+  RouteMe:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/me"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntMe}"
+
+  # GET /api/v1/shipments
+  IntShipmentsList:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/shipments"
+      PayloadFormatVersion: "1.0"
+  RouteShipmentsList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/shipments"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntShipmentsList}"
+
+  # POST /api/v1/shipments
+  IntShipmentsCreate:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: POST
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/shipments"
+      PayloadFormatVersion: "1.0"
+  RouteShipmentsCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/shipments"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntShipmentsCreate}"
+
+  # GET /api/v1/shipments/{id}
+  IntShipmentsGet:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/shipments/{id}"
+      PayloadFormatVersion: "1.0"
+  RouteShipmentsGet:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/shipments/{id}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntShipmentsGet}"
+
+  # PUT /api/v1/shipments/{id}/status
+  IntShipmentsStatus:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: PUT
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/shipments/{id}/status"
+      PayloadFormatVersion: "1.0"
+  RouteShipmentsStatus:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /api/v1/shipments/{id}/status"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntShipmentsStatus}"
+
+Outputs:
+  ApiGatewayUrl:
+    Description: URL base del API Gateway (apiUrl del front y base de Postman)
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/rutaexpress"
+  PruebaPublica:
+    Description: Abrir en el navegador - debe responder 200 sin token
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/rutaexpress/api/v1/public/status"
+  AppsElasticIp:
+    Description: IP fija de ec2-apps
+    Value: !Ref AppsEip
+  FrontendUrl:
+    Description: Frontend (cuando se agregue; certificado autofirmado)
+    Value: !Sub "https://${AppsEip}"
+  AzureRedirectUri:
+    Description: AGREGAR A MANO en Entra ID - App registration - Authentication - SPA (cuando se agregue el front)
+    Value: !Sub "https://${AppsEip}"
+  RabbitAdminUrl:
+    Description: ms-rutaexpress-rabbit-admin (solo desde tu IP)
+    Value: !Sub "http://${AppsEip}:8085/api/rabbitmq/queues/q.cmd.email"
+  RabbitMqConsolaNodo1:
+    Description: Consola RabbitMQ nodo 1 (solo desde tu IP; la IP publica de ec2-mq cambia al reiniciar el laboratorio)
+    Value: !Sub "http://${MqInstance.PublicIp}:15672"
+  RabbitMqConsolaNodo2:
+    Value: !Sub "http://${MqInstance.PublicIp}:15673"
+  MqPrivateIp:
+    Description: IP privada de ec2-mq (la usan los microservicios; no cambia)
+    Value: !GetAtt MqInstance.PrivateIp
+  SshApps:
+    Description: SSH a ec2-apps (con labsuser.pem de AWS Details)
+    Value: !Sub "ssh -i labsuser.pem ubuntu@${AppsEip}"
+  SshMq:
+    Value: !Sub "ssh -i labsuser.pem ubuntu@${MqInstance.PublicIp}"

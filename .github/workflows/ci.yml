@@ -28,3 +28,9 @@ jobs:
           cp .env.example .env
           docker compose -f compose.aws.yml config --quiet --no-path-resolution
           echo "apps: compose válido"
+
+      - name: Validar plantilla CloudFormation (cfn-lint)
+        run: |
+          pip install --quiet cfn-lint
+          cfn-lint cloudformation/rutaexpress-stack.yaml
+          echo "cloudformation: plantilla válida"
