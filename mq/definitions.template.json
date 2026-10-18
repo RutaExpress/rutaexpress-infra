@@ -1,0 +1,22 @@
+{
+  "users": [
+    { "name": "rx-admin",     "password_hash": "__RX_ADMIN_HASH__",     "hashing_algorithm": "rabbit_password_hashing_sha256", "tags": ["administrator"], "limits": {} },
+    { "name": "rx-ops",       "password_hash": "__RX_OPS_HASH__",       "hashing_algorithm": "rabbit_password_hashing_sha256", "tags": [], "limits": {} },
+    { "name": "rx-shipments", "password_hash": "__RX_SHIPMENTS_HASH__", "hashing_algorithm": "rabbit_password_hashing_sha256", "tags": [], "limits": {} },
+    { "name": "rx-notify",    "password_hash": "__RX_NOTIFY_HASH__",    "hashing_algorithm": "rabbit_password_hashing_sha256", "tags": [], "limits": {} }
+  ],
+  "vhosts": [
+    { "name": "rutaexpress" }
+  ],
+  "permissions": [
+    { "user": "rx-admin",     "vhost": "rutaexpress", "configure": ".*", "write": ".*", "read": ".*" },
+    { "user": "rx-ops",       "vhost": "rutaexpress", "configure": ".*", "write": ".*", "read": ".*" },
+    { "user": "rx-shipments", "vhost": "rutaexpress", "configure": "^cmd\\..*", "write": "^cmd\\..*", "read": "^$" },
+    { "user": "rx-notify",    "vhost": "rutaexpress", "configure": "^(cmd|q\\.cmd)\\..*", "write": "^(cmd|q\\.cmd)\\..*", "read": "^(cmd|q\\.cmd)\\..*" }
+  ],
+  "parameters": [],
+  "policies": [],
+  "queues": [],
+  "exchanges": [],
+  "bindings": []
+}

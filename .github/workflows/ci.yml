@@ -1,0 +1,23 @@
+# CI: valida la sintaxis de los compose en cada PR (con valores de ejemplo, sin secretos reales)
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  validate:
+    name: Validar docker compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar mq/compose.yml
+        working-directory: mq
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          python3 -m json.tool definitions.template.json > /dev/null
+          echo "compose y definitions válidos"
