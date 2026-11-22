@@ -1,0 +1,185 @@
+# Clúster Kafka del caso (sección 7 y 9): 3 Zookeeper + 3 brokers + Kafka UI → ec2-kafka
+# Los secretos se leen del archivo .env (no se sube a GitHub). Tópicos: los crea "topicos" al arrancar.
+x-zookeeper: &zookeeper
+  image: confluentinc/cp-zookeeper:7.6.1
+  restart: unless-stopped
+  networks:
+    - kafka_cluster
+
+x-kafka: &kafka
+  image: confluentinc/cp-kafka:7.6.1
+  restart: unless-stopped
+  networks:
+    - kafka_cluster
+  depends_on:
+    - zookeeper-1
+    - zookeeper-2
+    - zookeeper-3
+  healthcheck:
+    test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:29092 > /dev/null 2>&1"]
+    interval: 15s
+    timeout: 10s
+    retries: 20
+    start_period: 30s
+
+x-kafka-env: &kafka-env
+  KAFKA_ZOOKEEPER_CONNECT: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL      # los brokers hablan entre sí por la red interna
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3             # 3 réplicas: si cae un broker, otro toma el liderazgo
+  KAFKA_NUM_PARTITIONS: 3                         # 3 particiones: lectura en paralelo
+  KAFKA_MIN_INSYNC_REPLICAS: 2                    # una escritura se confirma con 2 réplicas al día
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"        # solo existen los tópicos que crea "topicos"
+  KAFKA_HEAP_OPTS: ${KAFKA_BROKER_HEAP:--Xms256m -Xmx512m}   # memoria de cada broker; en un PC con poca RAM se baja desde .env
+
+services:
+
+  # Zookeeper: 3 nodos (ensemble). Guarda qué brokers existen y quién es líder de cada partición
+  zookeeper-1:
+    <<: *zookeeper
+    container_name: zookeeper-1
+    hostname: zookeeper-1
+    environment:
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_SERVERS: zookeeper-1:2888:3888;zookeeper-2:2888:3888;zookeeper-3:2888:3888
+      KAFKA_HEAP_OPTS: "-Xms128m -Xmx256m"
+    volumes:
+      - zk_data_1:/var/lib/zookeeper/data
+      - zk_log_1:/var/lib/zookeeper/log
+
+  zookeeper-2:
+    <<: *zookeeper
+    container_name: zookeeper-2
+    hostname: zookeeper-2
+    environment:
+      ZOOKEEPER_SERVER_ID: 2
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_SERVERS: zookeeper-1:2888:3888;zookeeper-2:2888:3888;zookeeper-3:2888:3888
+      KAFKA_HEAP_OPTS: "-Xms128m -Xmx256m"
+    volumes:
+      - zk_data_2:/var/lib/zookeeper/data
+      - zk_log_2:/var/lib/zookeeper/log
+
+  zookeeper-3:
+    <<: *zookeeper
+    container_name: zookeeper-3
+    hostname: zookeeper-3
+    environment:
+      ZOOKEEPER_SERVER_ID: 3
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+      ZOOKEEPER_INIT_LIMIT: 5
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_SERVERS: zookeeper-1:2888:3888;zookeeper-2:2888:3888;zookeeper-3:2888:3888
+      KAFKA_HEAP_OPTS: "-Xms128m -Xmx256m"
+    volumes:
+      - zk_data_3:/var/lib/zookeeper/data
+      - zk_log_3:/var/lib/zookeeper/log
+
+  # Brokers: cada uno escucha en 2 puertas
+  #   INTERNAL kafka-N:29092 → para los otros brokers, Kafka UI y "topicos" (red del compose)
+  #   EXTERNAL KAFKA_HOST:909N → para los microservicios (localhost en el PC; IP privada de ec2-kafka en AWS)
+  kafka-1:
+    <<: *kafka
+    container_name: kafka-1
+    hostname: kafka-1
+    ports:
+      - "9092:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 1
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:29092,EXTERNAL://${KAFKA_HOST:-localhost}:9092
+    volumes:
+      - kafka_data_1:/var/lib/kafka/data
+
+  kafka-2:
+    <<: *kafka
+    container_name: kafka-2
+    hostname: kafka-2
+    ports:
+      - "9093:9093"
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 2
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:29092,EXTERNAL://${KAFKA_HOST:-localhost}:9093
+    volumes:
+      - kafka_data_2:/var/lib/kafka/data
+
+  kafka-3:
+    <<: *kafka
+    container_name: kafka-3
+    hostname: kafka-3
+    ports:
+      - "9094:9094"
+    environment:
+      <<: *kafka-env
+      KAFKA_BROKER_ID: 3
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:29092,EXTERNAL://0.0.0.0:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:29092,EXTERNAL://${KAFKA_HOST:-localhost}:9094
+    volumes:
+      - kafka_data_3:/var/lib/kafka/data
+
+  # Paso posterior: crea los tópicos del caso cuando los 3 brokers están sanos y termina (Exited 0)
+  topicos:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka-topicos
+    entrypoint: ["sh", "/scripts/crear-topicos.sh"]
+    volumes:
+      - ./crear-topicos.sh:/scripts/crear-topicos.sh:ro
+    networks:
+      - kafka_cluster
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+
+  # Consola web para ver brokers, tópicos, particiones, mensajes y consumer groups (con login)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      JAVA_OPTS: ${KAFKA_UI_JAVA_OPTS:--Xms64m -Xmx256m}   # sin tope, Java tomaría 1/4 de la RAM de Docker
+      KAFKA_CLUSTERS_0_NAME: rutaexpress
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-1:29092,kafka-2:29092,kafka-3:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+      AUTH_TYPE: LOGIN_FORM
+      SPRING_SECURITY_USER_NAME: ${KAFKA_UI_USER:?Falta KAFKA_UI_USER en .env}
+      SPRING_SECURITY_USER_PASSWORD: ${KAFKA_UI_PASSWORD:?Falta KAFKA_UI_PASSWORD en .env}
+    networks:
+      - kafka_cluster
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+
+volumes:
+  zk_data_1:
+  zk_log_1:
+  zk_data_2:
+  zk_log_2:
+  zk_data_3:
+  zk_log_3:
+  kafka_data_1:
+  kafka_data_2:
+  kafka_data_3:
+
+networks:
+  kafka_cluster:
+    driver: bridge

@@ -1,0 +1,1191 @@
+{
+  "info": {
+    "_postman_id": "cbd7c956-718b-43a0-a960-110bd2aa18f8",
+    "name": "Ruta Express",
+    "description": "Pruebas locales de RutaExpress en Docker (notebook de pruebas), antes de AWS. Llama directo a cada microservicio en 127.0.0.1, sin token (el BFF, el front y Entra ID se prueban en AWS). Correr en orden: cada carpeta es una prueba del plan (P1 a P15) del artefacto «RutaExpress: mapa del sistema».",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Etapa 1 · Flujo del caso (shipments, notify, report, audit)",
+      "item": [
+        {
+          "name": "P1 a P5 · Flujo del envío (shipments)",
+          "description": "Un envío de punta a punta. Crear guarda el id en {{shipmentId}} para las siguientes. Evidencia: Kafka UI (shipments.events y audit.timeline +1 por paso, lag 0 en report y audit), consola de RabbitMQ (desde ACEPTADO) y docker logs rx-notify.",
+          "item": [
+            {
+              "name": "P1 · Crear envío",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{clienteId}}",
+                    "description": "oid del cliente: en producción lo pone el BFF desde el token"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments",
+                "description": "Crea un envío en CREADO. Publica 2 eventos en Kafka (shipments.events y audit.timeline) y ningún comando en RabbitMQ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"serviceId\": \"svc-express\",\n  \"originAddress\": \"Av. Providencia 1234, Santiago\",\n  \"destinationAddress\": \"Calle Prat 456, Valparaíso\",\n  \"recipientName\": \"Ana Pérez\",\n  \"recipientEmail\": \"ana.perez@example.com\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "const envio = pm.response.json();",
+                      "pm.collectionVariables.set(\"shipmentId\", envio.id);",
+                      "pm.test(\"Responde 201\", () => pm.response.to.have.status(201));",
+                      "pm.test(\"Nace en CREADO con tracking RX-\", () => {",
+                      "    pm.expect(envio.status).to.eql(\"CREADO\");",
+                      "    pm.expect(envio.trackingNumber).to.match(/^RX-/);",
+                      "});"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "P1 · Ver el envío creado",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{shipmentsUrl}}/api/v1/shipments/{{shipmentId}}",
+                "description": "Lee el envío desde Oracle."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "P2 · ACEPTADO",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{operadorId}}",
+                    "description": "oid del operador que cambia el estado (queda como actor en audit)"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments/{{shipmentId}}/status",
+                "description": "Cambia el envío a ACEPTADO. RabbitMQ: comandos a q.cmd.email y q.cmd.warehouse; notify registra [EMAIL] y [TICKET] creado.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"ACEPTADO\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"Queda en ACEPTADO\", () => pm.expect(pm.response.json().status).to.eql(\"ACEPTADO\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "P3 · EN_BODEGA",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{operadorId}}",
+                    "description": "oid del operador que cambia el estado (queda como actor en audit)"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments/{{shipmentId}}/status",
+                "description": "Cambia el envío a EN_BODEGA. RabbitMQ: comando a q.cmd.label; notify registra [ETIQUETA] generada.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"EN_BODEGA\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"Queda en EN_BODEGA\", () => pm.expect(pm.response.json().status).to.eql(\"EN_BODEGA\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "P4 · EN_RUTA",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{operadorId}}",
+                    "description": "oid del operador que cambia el estado (queda como actor en audit)"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments/{{shipmentId}}/status",
+                "description": "Cambia el envío a EN_RUTA. RabbitMQ: q.cmd.email; notify registra [EMAIL].",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"EN_RUTA\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"Queda en EN_RUTA\", () => pm.expect(pm.response.json().status).to.eql(\"EN_RUTA\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "P5 · ENTREGADO",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{operadorId}}",
+                    "description": "oid del operador que cambia el estado (queda como actor en audit)"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments/{{shipmentId}}/status",
+                "description": "Cambia el envío a ENTREGADO. RabbitMQ: q.cmd.email; notify registra [EMAIL]. Kafka: 5 eventos por tópico en total.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"ENTREGADO\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"Queda en ENTREGADO\", () => pm.expect(pm.response.json().status).to.eql(\"ENTREGADO\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Listar envíos entregados",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{shipmentsUrl}}/api/v1/shipments?status=ENTREGADO",
+                "description": "Filtro por estado."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "P6 · Reglas y errores de shipments",
+          "item": [
+            {
+              "name": "P6 · Transición inválida (ENTREGADO → EN_RUTA)",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{operadorId}}",
+                    "description": "oid del operador que cambia el estado (queda como actor en audit)"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments/{{shipmentId}}/status",
+                "description": "ENTREGADO es final: 409 con ProblemDetail y sin eventos nuevos en Kafka ni comandos en RabbitMQ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"EN_RUTA\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 409\", () => pm.response.to.have.status(409));",
+                      "pm.test(\"Error con ProblemDetail: Transición de estado no permitida\", () => pm.expect(pm.response.json().title).to.eql(\"Transición de estado no permitida\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Crear sin datos obligatorios",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{clienteId}}",
+                    "description": "oid del cliente: en producción lo pone el BFF desde el token"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments",
+                "description": "400: validación del DTO.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"serviceId\": \"\",\n  \"originAddress\": \"\",\n  \"destinationAddress\": \"\",\n  \"recipientName\": \"\",\n  \"recipientEmail\": \"no-es-email\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 400\", () => pm.response.to.have.status(400));",
+                      "pm.test(\"Error con ProblemDetail: Error de validación\", () => pm.expect(pm.response.json().title).to.eql(\"Error de validación\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Envío que no existe",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{shipmentsUrl}}/api/v1/shipments/999999",
+                "description": "404 con ProblemDetail."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 404\", () => pm.response.to.have.status(404));",
+                      "pm.test(\"Error con ProblemDetail: Envío no encontrado\", () => pm.expect(pm.response.json().title).to.eql(\"Envío no encontrado\"));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "P7 · KPI de report",
+          "item": [
+            {
+              "name": "P7 · KPI últimas 24 h",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{reportUrl}}/api/v1/report/kpis?range=last24h",
+                "description": "estadosActivos (sin los entregados), enviosPorHora y leadTime (entregados y promedio de minutos)."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"Trae los 3 KPI\", () => {",
+                      "    const kpi = pm.response.json();",
+                      "    pm.expect(kpi).to.have.property(\"estadosActivos\");",
+                      "    pm.expect(kpi).to.have.property(\"enviosPorHora\");",
+                      "    pm.expect(kpi).to.have.property(\"leadTime\");",
+                      "});"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Servicios más usados (7 días)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{reportUrl}}/api/v1/report/top-services?range=last7d",
+                "description": "Envíos creados por serviceId."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Rango que no existe",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{reportUrl}}/api/v1/report/kpis?range=ayer",
+                "description": "400 con ProblemDetail."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 400\", () => pm.response.to.have.status(400));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "P8 · Timeline de audit",
+          "item": [
+            {
+              "name": "P8 · Timeline del envío",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{auditUrl}}/api/v1/audit/shipments/{{shipmentId}}",
+                "description": "Una fila por operación (une shipments.events y audit.timeline por correlationId): CREACION y 4 CAMBIO_ESTADO, con actorId, customerId y serviceId."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"5 pasos, uno por operación\", () => pm.expect(pm.response.json().length).to.eql(5));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Id que no es número",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{auditUrl}}/api/v1/audit/shipments/abc",
+                "description": "400 con ProblemDetail (antes 500)."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 400\", () => pm.response.to.have.status(400));",
+                      "pm.test(\"Error con ProblemDetail: Solicitud inválida\", () => pm.expect(pm.response.json().title).to.eql(\"Solicitud inválida\"));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "P9 · DLQ de RabbitMQ (email que falla)",
+          "description": "Antes: en rutaexpress-infra\\apps\\.env agregar NOTIFY_SMTP_FAIL_FIRST=3 y correr docker compose -f compose.aws.yml up -d notify. Evidencia: docker logs rx-notify con [REINTENTO], [NACK->DLQ] y [DLQ-ALERTA]. Después: volver a 0 y up -d notify.",
+          "item": [
+            {
+              "name": "P9 · Crear otro envío",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{clienteId}}",
+                    "description": "oid del cliente: en producción lo pone el BFF desde el token"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments",
+                "description": "Envío nuevo para la prueba (reemplaza {{shipmentId}}).",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"serviceId\": \"svc-express\",\n  \"originAddress\": \"Av. Providencia 1234, Santiago\",\n  \"destinationAddress\": \"Calle Prat 456, Valparaíso\",\n  \"recipientName\": \"Prueba DLQ\",\n  \"recipientEmail\": \"dlq@example.com\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "const envio = pm.response.json();",
+                      "pm.collectionVariables.set(\"shipmentId\", envio.id);",
+                      "pm.test(\"Responde 201\", () => pm.response.to.have.status(201));",
+                      "pm.test(\"Nace en CREADO con tracking RX-\", () => {",
+                      "    pm.expect(envio.status).to.eql(\"CREADO\");",
+                      "    pm.expect(envio.trackingNumber).to.match(/^RX-/);",
+                      "});"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "P9 · ACEPTADO",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{operadorId}}",
+                    "description": "oid del operador que cambia el estado (queda como actor en audit)"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments/{{shipmentId}}/status",
+                "description": "Cambia el envío a ACEPTADO. El primer email falla 3 veces: reintentos y luego DLQ.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"ACEPTADO\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"Queda en ACEPTADO\", () => pm.expect(pm.response.json().status).to.eql(\"ACEPTADO\"));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "P10 · DLT de Kafka",
+          "description": "Sin request: en Kafka UI → Topics → shipments.events → Produce Message, value «esto no es json». Evidencia: report.DLT y audit.DLT con 1 mensaje; report y audit siguen consumiendo (crear un envío después y ver que se procesa).",
+          "item": []
+        },
+        {
+          "name": "P11 · Cae un broker de Kafka",
+          "description": "Antes: docker stop kafka-3. Crear un envío: debe responder 201 y los eventos llegar a report y audit (3 réplicas, min.insync.replicas 2). Después: docker start kafka-3.",
+          "item": [
+            {
+              "name": "P11 · Crear envío con un broker abajo",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  },
+                  {
+                    "key": "X-User-Id",
+                    "value": "{{clienteId}}",
+                    "description": "oid del cliente: en producción lo pone el BFF desde el token"
+                  }
+                ],
+                "url": "{{shipmentsUrl}}/api/v1/shipments",
+                "description": "Con kafka-3 detenido.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"serviceId\": \"svc-express\",\n  \"originAddress\": \"Av. Providencia 1234, Santiago\",\n  \"destinationAddress\": \"Calle Prat 456, Valparaíso\",\n  \"recipientName\": \"Prueba broker caído\",\n  \"recipientEmail\": \"ana.perez@example.com\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "const envio = pm.response.json();",
+                      "pm.collectionVariables.set(\"shipmentId\", envio.id);",
+                      "pm.test(\"Responde 201\", () => pm.response.to.have.status(201));",
+                      "pm.test(\"Nace en CREADO con tracking RX-\", () => {",
+                      "    pm.expect(envio.status).to.eql(\"CREADO\");",
+                      "    pm.expect(envio.trackingNumber).to.match(/^RX-/);",
+                      "});"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Etapa 2 · Catálogo y administración",
+      "item": [
+        {
+          "name": "P12 · Catálogo (catalog)",
+          "item": [
+            {
+              "name": "P12 · Crear servicio",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{catalogUrl}}/api/v1/catalog/services",
+                "description": "201; guarda el id en {{catalogServiceId}}. Capacidad inicial 1 para probar el 409.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Express Prueba\",\n  \"basePrice\": 4990,\n  \"currency\": \"CLP\",\n  \"initialCapacity\": 1\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 201\", () => pm.response.to.have.status(201));",
+                      "pm.collectionVariables.set(\"catalogServiceId\", pm.response.json().id);"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Nombre repetido",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{catalogUrl}}/api/v1/catalog/services",
+                "description": "409 (antes 400).",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Express Prueba\",\n  \"basePrice\": 4990,\n  \"currency\": \"CLP\",\n  \"initialCapacity\": 1\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 409\", () => pm.response.to.have.status(409));",
+                      "pm.test(\"Error con ProblemDetail: Conflicto\", () => pm.expect(pm.response.json().title).to.eql(\"Conflicto\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Listar servicios",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{catalogUrl}}/api/v1/catalog/services",
+                "description": ""
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Bajar capacidad a 0",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{catalogUrl}}/api/v1/catalog/services/{{catalogServiceId}}",
+                "description": "capacityDelta -1: queda en 0.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"capacityDelta\": -1\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Sin capacidad",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{catalogUrl}}/api/v1/catalog/services/{{catalogServiceId}}",
+                "description": "Otra vez -1: 409 CapacityExhausted.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"capacityDelta\": -1\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 409\", () => pm.response.to.have.status(409));",
+                      "pm.test(\"Error con ProblemDetail: Conflicto\", () => pm.expect(pm.response.json().title).to.eql(\"Conflicto\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Eliminar servicio",
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": "{{catalogUrl}}/api/v1/catalog/services/{{catalogServiceId}}",
+                "description": "204."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 204\", () => pm.response.to.have.status(204));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "P13 · Administración de Kafka (kafka-admin)",
+          "item": [
+            {
+              "name": "P13 · Listar tópicos",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{kafkaAdminUrl}}/api/kafka/topics",
+                "description": ""
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "P13 · Describir shipments.events",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{kafkaAdminUrl}}/api/kafka/topics/shipments.events",
+                "description": "3 particiones y 3 réplicas."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));",
+                      "pm.test(\"3 particiones y 3 réplicas\", () => {",
+                      "    const t = pm.response.json();",
+                      "    pm.expect(t.partitions).to.eql(3);",
+                      "    pm.expect(t.replicationFactor).to.eql(3);",
+                      "});"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "P13 · Consumer groups con lag",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{kafkaAdminUrl}}/api/kafka/consumer-groups",
+                "description": "report y audit en STABLE con su lag."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Crear tópico de prueba",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{kafkaAdminUrl}}/api/kafka/topics",
+                "description": "201.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"prueba.admin\",\n  \"partitions\": 3,\n  \"replicationFactor\": 3\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 201\", () => pm.response.to.have.status(201));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Tópico con 0 particiones",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{kafkaAdminUrl}}/api/kafka/topics",
+                "description": "400 sin llamar a Kafka.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"prueba.mala\",\n  \"partitions\": 0,\n  \"replicationFactor\": 3\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 400\", () => pm.response.to.have.status(400));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Cambiar retención del tópico de prueba",
+              "request": {
+                "method": "PUT",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": "{{kafkaAdminUrl}}/api/kafka/topics/prueba.admin/config",
+                "description": "retention.ms = 1 día.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"configs\": {\n    \"retention.ms\": \"86400000\"\n  }\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Eliminar tópico de prueba",
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": "{{kafkaAdminUrl}}/api/kafka/topics/prueba.admin",
+                "description": ""
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Describir tópico que no existe",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{kafkaAdminUrl}}/api/kafka/topics/no.existe",
+                "description": "404 (antes 500)."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 404\", () => pm.response.to.have.status(404));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "P14 · Administración de RabbitMQ (rabbit-admin)",
+          "item": [
+            {
+              "name": "P14 · Estado de q.cmd.email",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": "{{rabbitAdminUrl}}/api/rabbitmq/queues/q.cmd.email",
+                "description": "Mensajes y consumidores."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Crear cola de prueba con TTL y DLX",
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": "{{rabbitAdminUrl}}/api/rabbitmq/queues?queueName=q.prueba&ttl=60000&deadLetterExchange=cmd.dead.dlx&deadLetterRoutingKey=prueba.dead",
+                "description": "201."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 201\", () => pm.response.to.have.status(201));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Nombre reservado amq.*",
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": "{{rabbitAdminUrl}}/api/rabbitmq/queues?queueName=amq.prueba",
+                "description": "400 con la lista de errores."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 400\", () => pm.response.to.have.status(400));",
+                      "pm.test(\"Error con ProblemDetail: Datos de entrada inválidos\", () => pm.expect(pm.response.json().title).to.eql(\"Datos de entrada inválidos\"));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "P14 · Purgar la DLQ de email",
+              "request": {
+                "method": "POST",
+                "header": [],
+                "url": "{{rabbitAdminUrl}}/api/rabbitmq/queues/q.cmd.email.dlq/purge",
+                "description": "Devuelve cuántos mensajes había (los de P9)."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "Eliminar cola de prueba",
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": "{{rabbitAdminUrl}}/api/rabbitmq/queues/q.prueba",
+                "description": ""
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Responde 200\", () => pm.response.to.have.status(200));"
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "P15 · Cae un nodo de RabbitMQ",
+          "description": "Sin request propio: docker stop rabbitmq-2, mirar la consola en http://localhost:15672 y repetir P2 con un envío nuevo. Con esto se decide classic o quorum. Después: docker start rabbitmq-2.",
+          "item": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "shipmentsUrl",
+      "value": "http://localhost:8081"
+    },
+    {
+      "key": "catalogUrl",
+      "value": "http://localhost:8083"
+    },
+    {
+      "key": "rabbitAdminUrl",
+      "value": "http://localhost:8085"
+    },
+    {
+      "key": "reportUrl",
+      "value": "http://localhost:8086"
+    },
+    {
+      "key": "auditUrl",
+      "value": "http://localhost:8087"
+    },
+    {
+      "key": "kafkaAdminUrl",
+      "value": "http://localhost:8088"
+    },
+    {
+      "key": "clienteId",
+      "value": "oid-cliente-prueba"
+    },
+    {
+      "key": "operadorId",
+      "value": "oid-operador-prueba"
+    },
+    {
+      "key": "shipmentId",
+      "value": ""
+    },
+    {
+      "key": "catalogServiceId",
+      "value": ""
+    }
+  ]
+}

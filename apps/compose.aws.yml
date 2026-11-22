@@ -1,11 +1,18 @@
-# Microservicios RutaExpress + Oracle (ec2-apps). RabbitMQ es el clúster de mq/ (otra máquina)
-# Secretos y datos del despliegue en .env (no se sube a GitHub). Imágenes construidas desde cada repo.
+# Microservicios RutaExpress + Oracle + frontend (ec2-apps). RabbitMQ (mq/) y Kafka (kafka/) son otras máquinas
+# Secretos y datos del despliegue en .env (no se sube a GitHub). Imágenes construidas desde el Dockerfile de cada repo.
 x-rabbit: &rabbit
   RABBITMQ_ADDRESSES: ${MQ_HOST:?Falta MQ_HOST en .env}:5672,${MQ_HOST}:5673
   RABBITMQ_VHOST: rutaexpress
 
+# Los 3 brokers de kafka/. KAFKA_HOST debe ser el MISMO que anuncian los brokers (kafka/.env)
+x-kafka: &kafka
+  KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_HOST:?Falta KAFKA_HOST en .env}:9092,${KAFKA_HOST}:9093,${KAFKA_HOST}:9094
+
 x-java: &java
   JAVA_TOOL_OPTIONS: ${JAVA_OPTS:--Xms128m -Xmx384m}
+
+# Oracle del compose: misma base ORCLPDB1, un usuario (esquema) por servicio
+x-oracle-url: &oracle-url jdbc:oracle:thin:@oracle:1521/ORCLPDB1
 
 # Garantiza que host.docker.internal exista dentro del contenedor (Docker Desktop y Linux)
 x-hosts: &hosts
@@ -20,16 +27,24 @@ services:
     environment:
       ORACLE_PASSWORD: ${ORACLE_PASSWORD:?Falta ORACLE_PASSWORD en .env}
       ORACLE_DATABASE: ORCLPDB1
-      APP_USER: SHIPMENTS_USER
+      APP_USER: SHIPMENTS_USER                                   # el de shipments lo crea la imagen
       APP_USER_PASSWORD: ${APP_USER_PASSWORD:?Falta APP_USER_PASSWORD en .env}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:?Falta CATALOG_DB_PASSWORD en .env}   # los usa oracle/01-usuarios.sh
+      REPORT_DB_PASSWORD: ${REPORT_DB_PASSWORD:?Falta REPORT_DB_PASSWORD en .env}
+      AUDIT_DB_PASSWORD: ${AUDIT_DB_PASSWORD:?Falta AUDIT_DB_PASSWORD en .env}
     volumes:
       - oracle_data:/opt/oracle/oradata
+      - ./oracle:/container-entrypoint-initdb.d:ro               # 01-usuarios.sh: solo al crear la base
     healthcheck:
       test: ["CMD", "healthcheck.sh"]
       interval: 10s
       timeout: 5s
       retries: 30
-    # Sin puertos publicados: solo shipments llega a Oracle por la red interna
+      start_period: 10m       # la PRIMERA vez crea ORCLPDB1 y los usuarios (≈ 8 min en un PC de 2 núcleos):
+                              # en ese lapso los chequeos fallidos no cuentan y Compose no se rinde
+    # Sin puertos publicados: los servicios llegan a Oracle por la red interna
+
+  # ---------- Felipe (Integrante 1) ----------
 
   shipments:
     build: ${REPO_SHIPMENTS:-../../ms-rutaexpress-shipments}/ms-rutaexpress-shipments
@@ -37,8 +52,8 @@ services:
     restart: unless-stopped
     extra_hosts: *hosts
     environment:
-      <<: [*rabbit, *java]
-      SPRING_DATASOURCE_URL: jdbc:oracle:thin:@oracle:1521/ORCLPDB1
+      <<: [*rabbit, *kafka, *java]
+      SPRING_DATASOURCE_URL: *oracle-url
       SPRING_DATASOURCE_USERNAME: SHIPMENTS_USER
       SPRING_DATASOURCE_PASSWORD: ${APP_USER_PASSWORD}
       RABBITMQ_USER: rx-shipments
@@ -56,9 +71,12 @@ services:
     environment:
       <<: *java
       SHIPMENTS_URL: http://shipments:8081
-      APP_CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:4200}
+      CATALOG_URL: http://catalog:8083
+      REPORT_URL: http://report:8086
+      AUDIT_URL: http://audit:8087
+      APP_CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:4200,https://localhost}
     ports:
-      - "8082:8082"               # lo llama el API Gateway
+      - "8082:8082"               # lo llama el API Gateway (en local, el front)
     depends_on:
       - shipments
 
@@ -74,6 +92,72 @@ services:
       NOTIFY_SMTP_FAIL_FIRST: ${NOTIFY_SMTP_FAIL_FIRST:-0}          # simulador de fallas (0 = apagado)
       NOTIFY_DLQ_ALERT_ENABLED: ${NOTIFY_DLQ_ALERT_ENABLED:-true}   # false = los fallidos quedan en la DLQ
 
+  # ---------- Yanfranco (Integrante 2) ----------
+
+  catalog:
+    build: ${REPO_CATALOG:-../../ms-rutaexpress-catalog}
+    container_name: rx-catalog
+    restart: unless-stopped
+    environment:
+      <<: *java
+      PORT: 8083
+      SPRING_DATASOURCE_URL: *oracle-url
+      SPRING_DATASOURCE_USERNAME: CATALOG_USER
+      SPRING_DATASOURCE_PASSWORD: ${CATALOG_DB_PASSWORD}
+      SPRING_DATASOURCE_DRIVER: oracle.jdbc.OracleDriver
+    ports:
+      - "127.0.0.1:8083:8083"
+    depends_on:
+      oracle:
+        condition: service_healthy
+
+  report:
+    build: ${REPO_REPORT:-../../ms-rutaexpress-report}/ms-rutaexpress-report
+    container_name: rx-report
+    restart: unless-stopped
+    extra_hosts: *hosts
+    environment:
+      <<: [*kafka, *java]
+      PORT: 8086
+      SPRING_DATASOURCE_URL: *oracle-url
+      SPRING_DATASOURCE_USERNAME: REPORT_USER
+      SPRING_DATASOURCE_PASSWORD: ${REPORT_DB_PASSWORD}
+      SPRING_DATASOURCE_DRIVER: oracle.jdbc.OracleDriver
+    ports:
+      - "127.0.0.1:8086:8086"
+    depends_on:
+      oracle:
+        condition: service_healthy
+
+  audit:
+    build: ${REPO_AUDIT:-../../ms-rutaexpress-audit}
+    container_name: rx-audit
+    restart: unless-stopped
+    extra_hosts: *hosts
+    environment:
+      <<: [*kafka, *java]
+      PORT: 8087
+      SPRING_DATASOURCE_URL: *oracle-url
+      SPRING_DATASOURCE_USERNAME: AUDIT_USER
+      SPRING_DATASOURCE_PASSWORD: ${AUDIT_DB_PASSWORD}
+      SPRING_DATASOURCE_DRIVER: oracle.jdbc.OracleDriver
+    ports:
+      - "127.0.0.1:8087:8087"
+    depends_on:
+      oracle:
+        condition: service_healthy
+
+  kafka-admin:
+    build: ${REPO_KAFKA_ADMIN:-../../ms-rutaexpress-kafka-admin}
+    container_name: rx-kafka-admin
+    restart: unless-stopped
+    extra_hosts: *hosts
+    environment:
+      <<: [*kafka, *java]
+      PORT: 8088
+    ports:
+      - "8088:8088"               # en AWS el Security Group lo abre solo a la IP del administrador
+
   rabbit-admin:
     build: ${REPO_ADMIN:-../../ms-rutaexpress-rabbit-admin}/ms-rutaexpress-rabbit-admin
     container_name: rx-rabbit-admin
@@ -86,7 +170,15 @@ services:
     ports:
       - "8085:8085"               # en AWS el Security Group lo abre solo a la IP del administrador
 
-  # frontend: se agrega cuando el front tenga su Dockerfile (nginx HTTPS, puerto 443)
+  frontend:
+    build:
+      context: ${REPO_FRONT:-../../FrontEnd-RutaExpress}/mi-app-angular-msal
+      args:
+        API_URL: ${API_URL:?Falta API_URL en .env}   # reemplaza __API_URL__ al compilar (URL HTTPS del API Gateway)
+    container_name: rx-frontend
+    restart: unless-stopped
+    ports:
+      - "443:443"                 # nginx con HTTPS autofirmado (Dockerfile del front)
 
 volumes:
   oracle_data:
