@@ -251,7 +251,7 @@ Resources:
 
           echo "[2/4] Clonando rutaexpress-infra (repo privado)"
           cd /home/ubuntu
-          git clone "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/rutaexpress-infra.git"
+          git clone -b main "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/rutaexpress-infra.git"
           git -C rutaexpress-infra remote set-url origin "https://github.com/${GitHubOrg}/rutaexpress-infra.git"
 
           echo "[3/4] Generando mq/.env (secretos desde parametros NoEcho)"
@@ -299,7 +299,7 @@ Resources:
 
           echo "[2/4] Clonando rutaexpress-infra (repo privado)"
           cd /home/ubuntu
-          git clone "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/rutaexpress-infra.git"
+          git clone -b main "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/rutaexpress-infra.git"
           git -C rutaexpress-infra remote set-url origin "https://github.com/${GitHubOrg}/rutaexpress-infra.git"
 
           echo "[3/4] Generando kafka/.env (los brokers anuncian la IP privada de esta maquina)"
@@ -360,12 +360,12 @@ Resources:
           swapon /swapfile
           echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
-          echo "[3/6] Clonando repos privados uno al lado del otro (el compose usa ../../)"
+          echo "[3/6] Clonando la rama main de cada repo, uno al lado del otro (el compose usa ../../)"
           cd /home/ubuntu
           for repo in rutaexpress-infra ms-rutaexpress-shipments ms-rutaexpress-bff ms-rutaexpress-notify \
                       ms-rutaexpress-catalog ms-rutaexpress-report ms-rutaexpress-audit \
                       ms-rutaexpress-kafka-admin ms-rutaexpress-rabbit-admin FrontEnd-RutaExpress; do
-            git clone "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/$repo.git"
+            git clone -b main "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/$repo.git"
             git -C "$repo" remote set-url origin "https://github.com/${GitHubOrg}/$repo.git"
           done
 
