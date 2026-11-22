@@ -1,35 +1,29 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
   RutaExpress en AWS Academy: VPC, ec2-mq (cluster RabbitMQ de 2 nodos con usuarios rx-*),
-  ec2-apps con Elastic IP (Oracle, shipments, bff, notify, rabbit-admin) y API Gateway HTTP
-  con CORS y authorizer JWT v2 de Microsoft Entra ID. Basado en la plantilla de referencia del curso.
+  ec2-kafka (3 Zookeeper + 3 brokers + Kafka UI), ec2-apps con Elastic IP (Oracle, 9 microservicios
+  y el front) y API Gateway HTTP con CORS y authorizer JWT v2 de Microsoft Entra ID.
 
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
-      - Label: { default: "Acceso (tu IP y SSH)" }
-        Parameters: [AdminCidr, InstanceConnectCidr, KeyName]
+      - Label: { default: "Acceso SSH" }
+        Parameters: [KeyName]
       - Label: { default: "Repositorios privados de GitHub" }
         Parameters: [GitHubOrg, GitHubToken]
       - Label: { default: "Secretos RabbitMQ (solo letras y numeros)" }
         Parameters: [RabbitErlangCookie, RxAdminPassword, RxOpsPassword, RxShipmentsPassword, RxNotifyPassword]
       - Label: { default: "Secretos Oracle (solo letras y numeros)" }
-        Parameters: [OraclePassword, OracleAppUserPassword]
+        Parameters: [OraclePassword, OracleAppUserPassword, CatalogDbPassword, ReportDbPassword, AuditDbPassword]
+      - Label: { default: "Kafka UI (solo letras y numeros)" }
+        Parameters: [KafkaUiPassword]
       - Label: { default: "Microsoft Entra ID (authorizer JWT del API Gateway)" }
         Parameters: [AzureTenantId, AzureClientId]
       - Label: { default: "Instancias" }
-        Parameters: [AmiId, AppsInstanceType, MqInstanceType, InstanceProfile]
+        Parameters: [AmiId, AppsInstanceType, MqInstanceType, KafkaInstanceType, InstanceProfile]
 
 Parameters:
   # ---------------------------------------------------------------- Acceso
-  AdminCidr:
-    Type: String
-    Description: Tu IP publica con /32 (ver https://checkip.amazonaws.com). Unica que entra a SSH, consola RabbitMQ y rabbit-admin
-    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
-  InstanceConnectCidr:
-    Type: String
-    Default: 18.206.107.24/29
-    Description: Rango de EC2 Instance Connect en us-east-1 (SSH desde el navegador)
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
     Default: vockey
@@ -84,6 +78,28 @@ Parameters:
     NoEcho: true
     AllowedPattern: '^[A-Za-z0-9]{8,}$'
     Description: Clave de SHIPMENTS_USER (la usa shipments)
+  CatalogDbPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave de CATALOG_USER (la usa catalog)
+  ReportDbPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave de REPORT_USER (la usa report)
+  AuditDbPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave de AUDIT_USER (la usa audit)
+
+  # ---------------------------------------------------------------- Kafka
+  KafkaUiPassword:
+    Type: String
+    NoEcho: true
+    AllowedPattern: '^[A-Za-z0-9]{8,}$'
+    Description: Clave del usuario admin de Kafka UI
 
   # ---------------------------------------------------------------- Entra ID (no son secretos)
   AzureTenantId:
@@ -102,11 +118,16 @@ Parameters:
     Type: String
     Default: t3.large
     AllowedValues: [t3.medium, t3.large]
-    Description: ec2-apps corre Oracle + 4 microservicios Java (t3.large = 8 GB recomendado)
+    Description: ec2-apps corre Oracle + 9 microservicios Java + el front (t3.large = 8 GB recomendado)
   MqInstanceType:
     Type: String
     Default: t3.small
     AllowedValues: [t3.small, t3.medium]
+  KafkaInstanceType:
+    Type: String
+    Default: t3.medium
+    AllowedValues: [t3.medium, t3.large]
+    Description: ec2-kafka corre 3 Zookeeper + 3 brokers + Kafka UI (t3.medium = 4 GB)
   InstanceProfile:
     Type: String
     Default: LabInstanceProfile
@@ -167,28 +188,39 @@ Resources:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: rutaexpress-apps-sg
-      GroupDescription: ec2-apps - frontend, BFF, rabbit-admin (solo admin) y SSH
+      GroupDescription: ec2-apps - frontend, BFF, rabbit-admin, kafka-admin y SSH
       VpcId: !Ref Vpc
       SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AdminCidr, Description: SSH administrador }
-        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref InstanceConnectCidr, Description: EC2 Instance Connect }
-        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: Frontend HTTPS (cuando se agregue) }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: 0.0.0.0/0, Description: SSH (solo con la llave labsuser.pem o EC2 Instance Connect) }
+        - { IpProtocol: tcp, FromPort: 443, ToPort: 443, CidrIp: 0.0.0.0/0, Description: Frontend HTTPS }
         - { IpProtocol: tcp, FromPort: 8082, ToPort: 8082, CidrIp: 0.0.0.0/0, Description: BFF (lo llama el API Gateway; valida JWT y roles) }
-        - { IpProtocol: tcp, FromPort: 8085, ToPort: 8085, CidrIp: !Ref AdminCidr, Description: rabbit-admin solo administrador }
+        - { IpProtocol: tcp, FromPort: 8085, ToPort: 8085, CidrIp: 0.0.0.0/0, Description: rabbit-admin (abierto por decision educativa; no tiene login) }
+        - { IpProtocol: tcp, FromPort: 8088, ToPort: 8088, CidrIp: 0.0.0.0/0, Description: kafka-admin (abierto por decision educativa; no tiene login) }
       Tags: [{ Key: Name, Value: rutaexpress-apps-sg }]
 
   MqSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupName: rutaexpress-mq-sg
-      GroupDescription: ec2-mq - AMQP solo desde ec2-apps, consola RabbitMQ solo admin y SSH
+      GroupDescription: ec2-mq - AMQP solo desde ec2-apps, consola RabbitMQ y SSH
       VpcId: !Ref Vpc
       SecurityGroupIngress:
-        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref AdminCidr, Description: SSH administrador }
-        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: !Ref InstanceConnectCidr, Description: EC2 Instance Connect }
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: 0.0.0.0/0, Description: SSH (solo con la llave labsuser.pem o EC2 Instance Connect) }
         - { IpProtocol: tcp, FromPort: 5672, ToPort: 5673, SourceSecurityGroupId: !Ref AppsSecurityGroup, Description: AMQP solo desde ec2-apps }
-        - { IpProtocol: tcp, FromPort: 15672, ToPort: 15673, CidrIp: !Ref AdminCidr, Description: Consola RabbitMQ solo administrador }
+        - { IpProtocol: tcp, FromPort: 15672, ToPort: 15673, CidrIp: 0.0.0.0/0, Description: Consola RabbitMQ (con login rx-admin) }
       Tags: [{ Key: Name, Value: rutaexpress-mq-sg }]
+
+  KafkaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: rutaexpress-kafka-sg
+      GroupDescription: ec2-kafka - brokers solo desde ec2-apps, Kafka UI y SSH
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 22, ToPort: 22, CidrIp: 0.0.0.0/0, Description: SSH (solo con la llave labsuser.pem o EC2 Instance Connect) }
+        - { IpProtocol: tcp, FromPort: 9092, ToPort: 9094, SourceSecurityGroupId: !Ref AppsSecurityGroup, Description: Kafka (3 brokers) solo desde ec2-apps }
+        - { IpProtocol: tcp, FromPort: 8080, ToPort: 8080, CidrIp: 0.0.0.0/0, Description: Kafka UI (con login admin) }
+      Tags: [{ Key: Name, Value: rutaexpress-kafka-sg }]
 
   # ================================================================ ec2-mq (cluster RabbitMQ)
   MqInstance:
@@ -238,6 +270,55 @@ Resources:
           docker compose up -d
           echo "RUTAEXPRESS MQ LISTO"
 
+  # ================================================================ ec2-kafka (cluster Kafka)
+  KafkaInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: PublicRoute
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !Ref KafkaInstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds: [!Ref KafkaSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs: { VolumeSize: 20, VolumeType: gp3 }
+      Tags: [{ Key: Name, Value: ec2-kafka }]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # ec2-kafka: Docker + 3 Zookeeper + 3 brokers + Kafka UI (rutaexpress-infra/kafka). Log: /var/log/cloud-init-output.log
+          set -eu
+          echo "[1/4] Instalando Docker"
+          apt-get update -y
+          apt-get install -y docker.io git curl
+          apt-get install -y docker-compose-v2 || apt-get install -y docker-compose-plugin
+          systemctl enable --now docker
+          usermod -aG docker ubuntu
+
+          echo "[2/4] Clonando rutaexpress-infra (repo privado)"
+          cd /home/ubuntu
+          git clone "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/rutaexpress-infra.git"
+          git -C rutaexpress-infra remote set-url origin "https://github.com/${GitHubOrg}/rutaexpress-infra.git"
+
+          echo "[3/4] Generando kafka/.env (los brokers anuncian la IP privada de esta maquina)"
+          TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+          IP_PRIVADA=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+          cat > rutaexpress-infra/kafka/.env <<EOF
+          KAFKA_HOST=$IP_PRIVADA
+          KAFKA_UI_USER=admin
+          KAFKA_UI_PASSWORD=${KafkaUiPassword}
+          KAFKA_BROKER_HEAP=-Xms256m -Xmx384m
+          EOF
+          chmod 600 rutaexpress-infra/kafka/.env
+          chown -R ubuntu:ubuntu rutaexpress-infra
+
+          echo "[4/4] Levantando el cluster (crea los 4 topicos con 3 particiones y 3 replicas)"
+          cd rutaexpress-infra/kafka
+          docker compose up -d
+          echo "RUTAEXPRESS KAFKA LISTO"
+
   # ================================================================ ec2-apps (microservicios)
   AppsEip:
     Type: AWS::EC2::EIP
@@ -272,7 +353,7 @@ Resources:
           systemctl enable --now docker
           usermod -aG docker ubuntu
 
-          echo "[2/6] Swap de 4 GB (Oracle + 4 JVM + compilacion Maven)"
+          echo "[2/6] Swap de 4 GB (Oracle + 9 JVM + compilacion Maven)"
           fallocate -l 4G /swapfile
           chmod 600 /swapfile
           mkswap /swapfile
@@ -281,19 +362,26 @@ Resources:
 
           echo "[3/6] Clonando repos privados uno al lado del otro (el compose usa ../../)"
           cd /home/ubuntu
-          for repo in rutaexpress-infra ms-rutaexpress-shipments ms-rutaexpress-bff ms-rutaexpress-notify ms-rutaexpress-rabbit-admin; do
+          for repo in rutaexpress-infra ms-rutaexpress-shipments ms-rutaexpress-bff ms-rutaexpress-notify \
+                      ms-rutaexpress-catalog ms-rutaexpress-report ms-rutaexpress-audit \
+                      ms-rutaexpress-kafka-admin ms-rutaexpress-rabbit-admin FrontEnd-RutaExpress; do
             git clone "https://x-access-token:${GitHubToken}@github.com/${GitHubOrg}/$repo.git"
             git -C "$repo" remote set-url origin "https://github.com/${GitHubOrg}/$repo.git"
           done
 
-          echo "[4/6] Generando apps/.env (IP privada de ec2-mq + secretos)"
+          echo "[4/6] Generando apps/.env (IP privada de ec2-mq y ec2-kafka + secretos)"
           cat > rutaexpress-infra/apps/.env <<EOF
           MQ_HOST=${MqInstance.PrivateIp}
+          KAFKA_HOST=${KafkaInstance.PrivateIp}
           RX_SHIPMENTS_PASSWORD=${RxShipmentsPassword}
           RX_NOTIFY_PASSWORD=${RxNotifyPassword}
           RX_OPS_PASSWORD=${RxOpsPassword}
           ORACLE_PASSWORD=${OraclePassword}
           APP_USER_PASSWORD=${OracleAppUserPassword}
+          CATALOG_DB_PASSWORD=${CatalogDbPassword}
+          REPORT_DB_PASSWORD=${ReportDbPassword}
+          AUDIT_DB_PASSWORD=${AuditDbPassword}
+          JAVA_OPTS=-Xms64m -Xmx256m -XX:MaxMetaspaceSize=160m -XX:+UseSerialGC
           CORS_ALLOWED_ORIGINS=https://${AppsEip},http://localhost:4200
           API_URL=https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/rutaexpress
           EOF
@@ -302,7 +390,8 @@ Resources:
 
           echo "[5/6] Construyendo imagenes de a una (evita quedarse sin memoria)"
           cd rutaexpress-infra/apps
-          for svc in shipments bff notify rabbit-admin; do
+          export BUILDX_BAKE_ENTITLEMENTS_FS=0   # Bake lee los repos que estan fuera de apps/ (../../)
+          for svc in shipments bff notify catalog report audit kafka-admin rabbit-admin frontend; do
             docker compose -f compose.aws.yml build "$svc"
           done
 
@@ -457,6 +546,114 @@ Resources:
       AuthorizerId: !Ref JwtAuthorizer
       Target: !Sub "integrations/${IntShipmentsStatus}"
 
+  # GET /api/v1/catalog/services  (ADMIN y OPERADOR; el BFF valida el rol)
+  IntCatalogList:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/catalog/services"
+      PayloadFormatVersion: "1.0"
+  RouteCatalogList:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/catalog/services"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntCatalogList}"
+
+  # POST /api/v1/catalog/services  (ADMIN)
+  IntCatalogCreate:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: POST
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/catalog/services"
+      PayloadFormatVersion: "1.0"
+  RouteCatalogCreate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /api/v1/catalog/services"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntCatalogCreate}"
+
+  # PUT /api/v1/catalog/services/{id}  (ADMIN)
+  IntCatalogUpdate:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: PUT
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/catalog/services/{id}"
+      PayloadFormatVersion: "1.0"
+  RouteCatalogUpdate:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "PUT /api/v1/catalog/services/{id}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntCatalogUpdate}"
+
+  # GET /api/v1/report/kpis?range=  (ADMIN)
+  IntReportKpis:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/report/kpis"
+      PayloadFormatVersion: "1.0"
+  RouteReportKpis:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/report/kpis"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntReportKpis}"
+
+  # GET /api/v1/report/top-services?range=  (ADMIN)
+  IntReportTop:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/report/top-services"
+      PayloadFormatVersion: "1.0"
+  RouteReportTop:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/report/top-services"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntReportTop}"
+
+  # GET /api/v1/audit/shipments/{id}  (AUDITOR y ADMIN)
+  IntAuditTimeline:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: !Sub "http://${AppsEip}:8082/api/v1/audit/shipments/{id}"
+      PayloadFormatVersion: "1.0"
+  RouteAuditTimeline:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /api/v1/audit/shipments/{id}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+      Target: !Sub "integrations/${IntAuditTimeline}"
+
 Outputs:
   ApiGatewayUrl:
     Description: URL base del API Gateway (apiUrl del front y base de Postman)
@@ -468,16 +665,16 @@ Outputs:
     Description: IP fija de ec2-apps
     Value: !Ref AppsEip
   FrontendUrl:
-    Description: Frontend (cuando se agregue; certificado autofirmado)
+    Description: Frontend (certificado autofirmado - aceptar la advertencia del navegador)
     Value: !Sub "https://${AppsEip}"
   AzureRedirectUri:
-    Description: AGREGAR A MANO en Entra ID - App registration - Authentication - SPA (cuando se agregue el front)
+    Description: AGREGAR A MANO en Entra ID - App registration - Authentication - SPA
     Value: !Sub "https://${AppsEip}"
   RabbitAdminUrl:
-    Description: ms-rutaexpress-rabbit-admin (solo desde tu IP)
+    Description: ms-rutaexpress-rabbit-admin
     Value: !Sub "http://${AppsEip}:8085/api/rabbitmq/queues/q.cmd.email"
   RabbitMqConsolaNodo1:
-    Description: Consola RabbitMQ nodo 1 (solo desde tu IP; la IP publica de ec2-mq cambia al reiniciar el laboratorio)
+    Description: Consola RabbitMQ nodo 1 (la IP publica de ec2-mq cambia al reiniciar el laboratorio)
     Value: !Sub "http://${MqInstance.PublicIp}:15672"
   RabbitMqConsolaNodo2:
     Value: !Sub "http://${MqInstance.PublicIp}:15673"
@@ -489,3 +686,14 @@ Outputs:
     Value: !Sub "ssh -i labsuser.pem ubuntu@${AppsEip}"
   SshMq:
     Value: !Sub "ssh -i labsuser.pem ubuntu@${MqInstance.PublicIp}"
+  KafkaUiUrl:
+    Description: Kafka UI (usuario admin y la clave KafkaUiPassword)
+    Value: !Sub "http://${KafkaInstance.PublicIp}:8080"
+  KafkaAdminUrl:
+    Description: ms-rutaexpress-kafka-admin
+    Value: !Sub "http://${AppsEip}:8088/api/kafka/consumer-groups"
+  KafkaPrivateIp:
+    Description: IP privada de ec2-kafka (KAFKA_HOST de los microservicios; no cambia)
+    Value: !GetAtt KafkaInstance.PrivateIp
+  SshKafka:
+    Value: !Sub "ssh -i labsuser.pem ubuntu@${KafkaInstance.PublicIp}"
